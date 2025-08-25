@@ -18,8 +18,8 @@ This project allows you to extract, compare, and analyze followers and following
 ## Installation
 1. **Clone the repository**
    ```bash
-   git clone <YOUR_REPO_URL>
-   cd <repo_folder_name>
+   git clone https://github.com/NECKER55/bot_instagram_scraper.git
+   cd bot_instagram_scraper
    ```
 2. **Install Python dependencies**
    ```bash
