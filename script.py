@@ -50,49 +50,6 @@ def login(bot, username, password):
     password_input.send_keys(Keys.RETURN)
     
     time.sleep(5)
-def get_user_counts(bot, username):
-    """Ottiene il numero di follower e following dal profilo, anche per pochi utenti"""
-    bot.get(f'https://www.instagram.com/{username}/')
-    time.sleep(3)  # Attendere caricamento della pagina
-    
-    counts = {"followers": 0, "following": 0}
-    
-    try:
-        # Cerca i link che contengono i numeri
-        stats_links = bot.find_elements(By.CSS_SELECTOR, "a[href*='/followers/'], a[href*='/following/']")
-        
-        for link in stats_links:
-            href = link.get_attribute('href')
-            text = link.text.strip()
-            
-            # Se il testo è vuoto, prova con l'attributo 'title'
-            if not text:
-                text = link.get_attribute('title')
-            
-            list_type = None
-            if '/followers' in href:
-                list_type = "followers"
-            elif '/following' in href:
-                list_type = "following"
-            
-            if list_type and text:
-                # Prova a estrarre il numero con regex
-                number_match = re.search(r'([\d,\.]+[KMB]?)', text.replace(',', ''))
-                if number_match:
-                    number_str = number_match.group(1)
-                    counts[list_type] = convert_to_number(number_str)
-                    logging.info(f"Found {counts[list_type]} {list_type} for {username}")
-                else:
-                    # fallback: se la regex fallisce ma sappiamo il tipo, assegna almeno 1
-                    counts[list_type] = 1
-                    logging.info(f"Could not parse number, setting {list_type} = 1 for {username}")
-                    
-    except Exception as e:
-        logging.error(f"Error getting user counts: {e}")
-        counts = {"followers": 1, "following": 1}  # fallback per sicurezza
-    
-    return counts
-
 
 def convert_to_number(number_str):
     """Converte stringhe come '1.2K' o '1,234' in numeri interi"""
@@ -150,9 +107,7 @@ def scrape_list(bot, username, expected_count, list_type="followers"):
             EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='dialog']"))
         )
         logging.info(f"{list_type.capitalize()} dialog opened successfully")
-        # Prova a cliccare, ma non bloccare in caso di errore
     except TimeoutException:
-        # Fallback: cerca comunque il dialog
         try:
             dialog = bot.find_element(By.CSS_SELECTOR, "div[role='dialog']")
             logging.info(f"{list_type.capitalize()} dialog found via fallback")
@@ -160,10 +115,10 @@ def scrape_list(bot, username, expected_count, list_type="followers"):
             logging.error(f"{list_type.capitalize()} dialog could not be found at all")
             return
 
-    
     users = set()
     last_count = 0
     no_change_count = 0
+    max_no_change_attempts = 10  # Numero massimo di tentativi senza nuovi utenti
     
     scroll_origin = ScrollOrigin.from_element(dialog)
     
@@ -173,42 +128,67 @@ def scrape_list(bot, username, expected_count, list_type="followers"):
         try:
             profile_links = bot.find_elements(By.CSS_SELECTOR, "div[role='dialog'] a[href*='/']")
             for link in profile_links:
-                if len(users) >= expected_count:  # stop se raggiunto il numero atteso
-                    break
-
                 href = link.get_attribute('href')
                 if href and '/p/' not in href and '/explore/' not in href and '/reels/' not in href:
                     username_extracted = href.strip('/').split('/')[-1]
-
-                    if username_extracted and username_extracted.lower() not in [
-                        '', 'instagram', 'accounts'
-                    ]:
-                        if '?' not in username_extracted:  # ignora parametri extra
+                    if username_extracted and username_extracted.lower() not in ['', 'instagram', 'accounts']:
+                        if '?' not in username_extracted:
                             users.add(username_extracted)
         except Exception as e:
             logging.warning(f"Error collecting profiles: {e}")
 
         current_count = len(users)
+        
+        # Log del progresso
+        if current_count > last_count:
+            logging.info(f"Collected {current_count}/{expected_count} {list_type} so far...")
+            last_count = current_count
+            no_change_count = 0  # Reset del contatore quando trova nuovi utenti
+        else:
+            no_change_count += 1
+            logging.debug(f"No new users found. Attempt {no_change_count}/{max_no_change_attempts}")
+        
+        # Condizioni di uscita
         if current_count >= expected_count:
-            logging.info(f"Collected all {expected_count} {list_type}")
+            logging.info(f"✓ Collected all {expected_count} {list_type}")
             break
-
-        # Scroll per caricare altri elementi se non ha raggiunto expected_count
+        
+        # Se non trova nuovi utenti dopo X tentativi, probabilmente ha raggiunto la fine
+        if no_change_count >= max_no_change_attempts:
+            logging.warning(f"⚠️ No new {list_type} found after {max_no_change_attempts} attempts.")
+            logging.info(f"Stopping at {current_count} {list_type} (expected {expected_count})")
+            if current_count < expected_count * 0.8:  # Se ha raccolto meno dell'80% del previsto
+                logging.warning(f"⚠️ Collected only {current_count}/{expected_count} ({current_count/expected_count*100:.1f}%)")
+                logging.warning("Possible reasons: private account, blocked users, or incorrect expected count")
+            break
+        
+        # Scroll per caricare altri elementi
         try:
             actions = ActionChains(bot)
             actions.scroll_from_origin(scroll_origin, 0, 300).perform()
         except Exception:
-            bot.execute_script("arguments[0].scrollTop += 300;", dialog)
-
-        time.sleep(random.uniform(0, 1))
-
+            try:
+                bot.execute_script("arguments[0].scrollTop += 300;", dialog)
+            except:
+                logging.warning("Could not perform scroll")
+        
+        # Pausa variabile per sembrare più umano
+        time.sleep(random.uniform(0.5, 1.5))
+        
+        # Controllo di sicurezza per evitare loop infiniti
+        if no_change_count > 5:
+            # Prova uno scroll più grande
+            try:
+                bot.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", dialog)
+                time.sleep(2)  # Pausa più lunga dopo scroll grande
+            except:
+                pass
     
     users_list = list(users)
-    logging.info(f"Saving {len(users_list)} {list_type} for {username}...")
+    logging.info(f"✓ Saving {len(users_list)} {list_type} for {username}...")
     with open(f'{username}_{list_type}.txt', 'w') as file:
         file.write('\n'.join(users_list))
-    logging.info(f"Successfully saved {len(users_list)} {list_type}")
-
+    logging.info(f"✓ Successfully saved {len(users_list)} {list_type}")
 
 # --- FUNZIONI DI COMPARAZIONE E REPORT ---
 def read_usernames_from_file(filename):
@@ -294,7 +274,29 @@ def scrape():
     
     usernames = input("Enter the Instagram usernames you want to scrape (separated by commas): ").split(",")
     
-    service = Service()
+    # Chiedi il numero di followers e following attesi
+    print("\nPer ogni utente, inserisci il numero approssimativo di followers e following.")
+    print("Puoi usare formati come: 1000, 1.5K, 2M, etc.\n")
+    
+    user_counts = {}
+    for user in usernames:
+        user = user.strip()
+        print(f"\nPer @{user}:")
+        followers_input = input(f"  Numero di followers (es: 1000, 1.5K): ")
+        following_input = input(f"  Numero di following (es: 500, 2K): ")
+        
+        # Converti gli input in numeri
+        followers_count = convert_to_number(followers_input)
+        following_count = convert_to_number(following_input)
+        
+        user_counts[user] = {
+            "followers": followers_count,
+            "following": following_count
+        }
+        
+        print(f"  ✓ Impostato: {followers_count} followers, {following_count} following")
+
+    service = Service('/usr/local/bin/chromedriver') # Aggiorna il percorso se necessario di chromedriver
     options = webdriver.ChromeOptions()
     options.add_argument('--no-sandbox')
     options.add_argument("--log-level=3")
@@ -311,11 +313,16 @@ def scrape():
         for user in usernames:
             user = user.strip()
             try:
-                # Ottieni i conteggi di follower e following
-                counts = get_user_counts(bot, user)
+                # Usa i conteggi inseriti manualmente
+                counts = user_counts[user]
                 logging.info(f"\nStarting scrape for {user}:")
                 logging.info(f"Expected followers: {counts['followers']}")
                 logging.info(f"Expected following: {counts['following']}")
+                
+                # Naviga al profilo
+                bot.get(f'https://www.instagram.com/{user}/')
+                time.sleep(3)
+                
                 # Scrape followers
                 scrape_list(bot, user, counts['followers'], "followers")
                 # Scrape following
